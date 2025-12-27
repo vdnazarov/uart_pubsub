@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2025 Nazarov Vsevolod
+ * This code is licensed under the MIT License. See LICENSE.md for details.
+ */
+
 #include "protocol.h"
 
 #include <iostream>

@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Nazarov Vsevolod
+# This code is licensed under the MIT License. See LICENSE.md for details.
+
 cmake_minimum_required(VERSION 3.5)
 project(uart_pubsub LANGUAGES CXX)
 
