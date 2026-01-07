@@ -24,6 +24,7 @@ int main(int argc, char* argv[])
     protocol::SerialSettings s;
     s.device = "/dev/ttyAMA0";
     s.recv_timeout_desisec = 100;
+    s.control_pin = 34;
     protocol::Protocol p(s, 3, false);
     p.poll([](const std::string& msg, protocol::msg_type_type type) -> bool
     {
@@ -49,5 +50,6 @@ int main(int argc, char* argv[])
     });
     while(running)
         usleep(100000);
+    p.stop();
     return 0;
 }

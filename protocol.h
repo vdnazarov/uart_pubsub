@@ -38,6 +38,9 @@ struct SerialSettings
 
     /// \brief Message recv timeout, decsec (1/10 of a second)
     int recv_timeout_desisec{10};
+
+    /// \brief RS485 control GPIO pin. -1 if unused
+    int control_pin{34};
 };
 
 using msg_type_type = uint8_t;
