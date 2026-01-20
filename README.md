@@ -32,7 +32,7 @@ target_link_libraries(exapmple_app PUBLIC UARTPS::ulprotocol)
 ```cmake
 FetchContetnt_Declare(UARTPS SYSTEM
   GIT_REPOSITORY https://github.com/vdnazarov/uart_pubsub
-  GIT_TAG v1.0
+  GIT_TAG v2.0
   GIT_SHALLOW TRUE)
 set(UPS_TEST OFF CACHE BOOL "" FORCE)
 FetchContetnt_MakeAvailable(UARTPS)
