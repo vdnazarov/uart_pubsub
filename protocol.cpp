@@ -1,8 +1,3 @@
-/*
- * Copyright (c) 2025 Nazarov Vsevolod
- * This code is licensed under the MIT License. See LICENSE.md for details.
- */
-
 #include "protocol.h"
 
 #include <iostream>
@@ -20,6 +15,131 @@
 #include <cstring>
 #include <assert.h>
 #include <thread>
+#include <fstream>
+
+namespace gpio
+{
+
+class GpioOutPin
+{
+    std::string number;
+    bool opened{false};
+    bool valid{false};
+
+    std::string pinDir() const
+    {
+        return "/sys/class/gpio/gpio" + number;
+    }
+
+    std::string valueFile() const
+    {
+        return pinDir() + "/value";
+    }
+
+    bool unexport()
+    {
+        if(!valid)
+            return true;
+        opened = false;
+        std::ofstream f("/sys/class/gpio/unexport", std::ios::out);
+        if(!f.is_open())
+            return false;
+
+        if(!f.write(number.data(), number.size()))
+        {
+            f.close();
+            return false;
+        }
+        f.close();
+        return true;
+    }
+public:
+    GpioOutPin(unsigned int number)
+        : number(std::to_string(number))
+    {
+        opened = true;
+        valid = number > 0;
+        close();
+    }
+
+    ~GpioOutPin()
+    {
+        close();
+    }
+
+    bool open()
+    {
+        if(!valid)
+            return true;
+        std::ofstream f("/sys/class/gpio/export", std::ios::out);
+        if(!f.is_open())
+            return false;
+
+        if(!f.write(number.data(), number.size()))
+            return false;
+
+        f.close();
+
+        f.open(pinDir()+ "/direction", std::ios::out);
+        if(!f.is_open())
+        {
+            unexport();
+            return false;
+        }
+        if(!f.write("out", 3))
+        {
+            f.close();
+            unexport();
+            return false;
+        }
+
+        f.close();
+        opened = true;
+        return true;
+    }
+
+    bool close()
+    {
+        if(!valid)
+            return true;
+        if(!opened)
+            return true;
+        std::ofstream f(pinDir() + "/direction", std::ios::out);
+        if(!f.is_open())
+        {
+            unexport();
+            return false;
+        }
+        if(!f.write("in" , 2))
+        {
+            f.close();
+            unexport();
+            return false;
+        }
+        return unexport();
+    }
+
+    bool setVaue(bool v)
+    {
+        if(!valid)
+            return true;
+        if(!opened)
+            return false;
+        std::ofstream f(valueFile(), std::ios::out);
+        if(!f.is_open())
+            return false;
+        auto sv = std::to_string(v ? 1 : 0);
+        if(!f.write(sv.data(), sv.size()))
+        {
+            f.close();
+            return false;
+        }
+        f.close();
+        return true;
+    }
+};
+
+}
 
 namespace protocol {
 
@@ -39,11 +159,15 @@ class Serial
 {
     int serial_port;
     int send_to;
+    gpio::GpioOutPin ctrl;
 public:
     Serial(const SerialSettings& settings)
-        : send_to(settings.send_timeout_msec)
+        : send_to(settings.send_timeout_msec),
+          ctrl(settings.control_pin)
     {
-        serial_port = open(settings.device.data(), O_RDWR | O_NOCTTY);
+        if(!ctrl.open())
+            throw uart_err("Failed to open cotrol pin");
+        serial_port = open(settings.device.data(), O_RDWR | O_NOCTTY | O_SYNC);
         if(serial_port < 0)
             throw uart_err("failed to open device " + settings.device);
         struct termios tty;
@@ -54,7 +178,8 @@ public:
         tty.c_cflag &= ~CSTOPB; // 1 stop bit
         tty.c_cflag &= ~CSIZE;
         tty.c_cflag |= CS8; // 8 bits per byte
-        tty.c_cflag |= CREAD | CLOCAL; // Read and write with ognoring of a control line
+        tty.c_cflag |= (CREAD | CLOCAL); // Read and write with ognoring of a control line
+        tty.c_cflag &= ~CRTSCTS; // No flow control
         tty.c_cc[VMIN] = 0;
         tty.c_cc[VTIME] = settings.recv_timeout_desisec; // 1 secod = 10
 
@@ -63,11 +188,13 @@ public:
         tty.c_lflag &= ~ECHOE;
         tty.c_lflag &= ~ECHONL;
         tty.c_lflag &= ~ISIG;
+        tty.c_iflag &= ~(IXON | IXOFF | IXANY); // no xon/xoff
 
         tty.c_oflag &= ~OPOST; // prevent spesioan interruption for output bytes
         tty.c_oflag &= ~ONLCR; // Prevent convertion of newline ot carrige return
 
         tcsetattr(serial_port, TCSANOW, &tty);
+        ctrl.setVaue(false);
     }
 
     ~Serial() noexcept(false)
@@ -76,11 +203,41 @@ public:
             throw uart_err("Fauled to close UART");
     }
 
-    bool lockWrite() { return true; }
-    bool unlockWrite() { return true; }
+    bool lockWrite()
+    {
+        try
+        {
+            return ctrl.setVaue(true);
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << std::endl;
+            return false;
+        }
+    }
+    bool unlockWrite()
+    {
+        try
+        {
+            tcdrain(serial_port);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            return ctrl.setVaue(false);
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << std::endl;
+            return false;
+        }
+    }
     bool whaitRead()
     {
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return true;
+    }
+
+    bool whaitWrite()
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         return true;
     }
 
@@ -90,6 +247,7 @@ public:
         std::cout << "Sending " << data.size() << std::endl;
         while(offset < data.size())
         {
+            tcdrain(serial_port);
             if(send_to > 0)
             {
                 fd_set write_fds;
@@ -122,7 +280,7 @@ public:
                 return false;
             offset += res;
         }
-        return true;
+        return tcdrain(serial_port) == 0;
     }
 
     std::string readData()
@@ -255,12 +413,18 @@ public:
         if(len+offset+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
             return "bad length";
 
-        std::string payload(msg.data()+offset, len);
-        offset += payload.size();
+        std::string payload;
+        payload.resize(len);
+        memcpy(payload.data(), msg.data()+offset, len);
+        offset += len;
 
         checksumm_type ch;
         memcpy(&ch, msg.data()+offset, sizeof(ch));
-        if(ch != checksumm({msg.data()+sizeof(START_BYTE), offset-sizeof(START_BYTE)}))
+        std::string cspl;
+        cspl.resize(offset-sizeof(START_BYTE));
+        memcpy(cspl.data(), msg.data()+sizeof(START_BYTE), offset-sizeof(START_BYTE));
+
+        if(ch != checksumm(cspl))
             return "checksumm failed";
         offset += sizeof(ch);
 
@@ -281,6 +445,32 @@ public:
     {
         if(!running)
             return;
+        std::cout << "Sending ";
+        switch (type)
+        {
+        case MSG_DATA:
+            std::cout << "data";
+            break;
+        case MSG_ACK:
+            std::cout << "act";
+            break;
+        case MSG_NACK:
+            std::cout << "nack";
+            break;
+        case MSG_ERROR:
+            std::cout << "error";
+            break;
+        case MSG_READY:
+            std::cout << "ready";
+            break;
+        case MSG_DONE:
+            std::cout << "done";
+            break;
+        default:
+            std::cout << "unknown";
+            break;
+        }
+        std::cout << std::endl;
         std::lock_guard<std::mutex> l(mutex);
         cache.push(formMsg(payload, type));
     }
@@ -289,6 +479,9 @@ public:
     {
         assert(serial);
         int bad_count{0}, nack_count{0};
+        serial.reset(nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        serial.reset(new Serial(ssettings));
         while(bad_count < retry_cout)
         {
             {
@@ -364,7 +557,7 @@ public:
                 }
                 catch(const std::exception& e)
                 {
-                    continue;
+                    //std::cerr << e.what() << std::endl;
                 }
                 catch(...)
                 {
@@ -375,18 +568,25 @@ public:
                 return false;
 
             message = unwrapMsg(ok, message, type, seq);
+            if(!serial->whaitWrite())
+                return false;
             SerialLock l(serial.get());
-            if(ok)
+            if(!ok)
             {
-                int i{0};
-                for(;i<retry_cout; ++i)
-                    if(serial->writeData(formMsg("", MSG_ACK)))
-                        break;
-                if(i >= retry_cout)
-                    std::cout << "Failed to reply" << std::endl;
+                std::cerr << message << std::endl;
+                std::cerr << "Sending NACK: " << serial->writeData(formMsg("", MSG_NACK)) << std::endl;
             }
             else
-                serial->writeData(formMsg("", MSG_NACK));
+            {
+                int i{0};
+                for(;i<retry_cout*10; ++i)
+                    if(serial->writeData(formMsg("", MSG_ACK)))
+                        break;
+                if(i >= retry_cout*10)
+                {
+                    std::cout << "Failed to reply" << std::endl;
+                }
+            }
         }
         return true;
     }
@@ -396,7 +596,6 @@ public:
     const int retry_cout;
     std::string last_error;
     bool started{false};
-    bool server;
     Protocol::ClientPollAction on_recv_actor;
 
     class ProtocolError: public std::runtime_error
@@ -407,15 +606,14 @@ public:
         {}
     };
 
-    ProtocolPrivate(const SerialSettings& settings, int retry_count, bool server)
+    ProtocolPrivate(const SerialSettings& settings, int retry_count)
         : ssettings(settings),
-          retry_cout(retry_count),
-          server(server)
+          retry_cout(retry_count)
     {}
 };
 
 Protocol::Protocol(const SerialSettings& settings, int retry_count, bool server)
-    : p(new ProtocolPrivate(settings, retry_count, server))
+    : p(new ProtocolPrivate(settings, retry_count))
 {
     p->serial.reset(new Serial(settings));
     if(server)
@@ -504,13 +702,11 @@ void Protocol::sendPayload(const std::string& message, bool is_error)
 
 void Protocol::stop()
 {
-    if(p->server)
+    if(!p->started)
     {
         p->running = false;
         return;
     }
-    if(!p->started)
-        throw ProtocolPrivate::ProtocolError("attempt to done defore ready");
     p->sendMessage("", MSG_DONE);
     std::lock_guard<std::mutex> l(p->mutex);
     p->cache.push("");
