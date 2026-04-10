@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Nazarov Vsevolod
+// This code is licensed under the MIT License. See LICENSE.md for details.
+
 #include "protocol.h"
 
 #include <iostream>
@@ -15,126 +18,30 @@
 #include <cstring>
 #include <assert.h>
 #include <thread>
-#include <fstream>
+#include <wiringPi.h>
 
-namespace gpio
-{
+
+namespace gpio {
 
 class GpioOutPin
 {
-    std::string number;
-    bool opened{false};
-    bool valid{false};
-
-    std::string pinDir() const
-    {
-        return "/sys/class/gpio/gpio" + number;
-    }
-
-    std::string valueFile() const
-    {
-        return pinDir() + "/value";
-    }
-
-    bool unexport()
-    {
-        if(!valid)
-            return true;
-        opened = false;
-        std::ofstream f("/sys/class/gpio/unexport", std::ios::out);
-        if(!f.is_open())
-            return false;
-
-        if(!f.write(number.data(), number.size()))
-        {
-            f.close();
-            return false;
-        }
-        f.close();
-        return true;
-    }
+    const int num;
 public:
-    GpioOutPin(unsigned int number)
-        : number(std::to_string(number))
-    {
-        opened = true;
-        valid = number > 0;
-        close();
-    }
-
-    ~GpioOutPin()
-    {
-        close();
-    }
+    GpioOutPin(int n)
+        : num(n)
+    {}
 
     bool open()
     {
-        if(!valid)
-            return true;
-        std::ofstream f("/sys/class/gpio/export", std::ios::out);
-        if(!f.is_open())
+        if(wiringPiSetupGpio() == -1)
             return false;
-
-        if(!f.write(number.data(), number.size()))
-            return false;
-
-        f.close();
-
-        f.open(pinDir()+ "/direction", std::ios::out);
-        if(!f.is_open())
-        {
-            unexport();
-            return false;
-        }
-        if(!f.write("out", 3))
-        {
-            f.close();
-            unexport();
-            return false;
-        }
-
-        f.close();
-        opened = true;
+        pinMode(num, OUTPUT);
         return true;
-    }
-
-    bool close()
-    {
-        if(!valid)
-            return true;
-        if(!opened)
-            return true;
-        std::ofstream f(pinDir() + "/direction", std::ios::out);
-        if(!f.is_open())
-        {
-            unexport();
-            return false;
-        }
-        if(!f.write("in" , 2))
-        {
-            f.close();
-            unexport();
-            return false;
-        }
-        return unexport();
     }
 
     bool setVaue(bool v)
     {
-        if(!valid)
-            return true;
-        if(!opened)
-            return false;
-        std::ofstream f(valueFile(), std::ios::out);
-        if(!f.is_open())
-            return false;
-        auto sv = std::to_string(v ? 1 : 0);
-        if(!f.write(sv.data(), sv.size()))
-        {
-            f.close();
-            return false;
-        }
-        f.close();
+        pinMode(num, v ? HIGH : LOW);
         return true;
     }
 };
@@ -146,6 +53,7 @@ namespace protocol {
 using msg_edge = uint8_t;
 static const constexpr msg_edge START_BYTE = 0x7e;
 static const constexpr msg_edge STOP_BYTE = 0x7f;
+using raw_data = std::vector<uint8_t>;
 
 class uart_err: public std::runtime_error
 {
@@ -172,26 +80,22 @@ public:
             throw uart_err("failed to open device " + settings.device);
         struct termios tty;
         tcgetattr(serial_port, &tty);
+
+        // speed
         cfsetospeed(&tty, settings.speed);
         cfsetispeed(&tty, settings.speed);
-        tty.c_cflag &= ~PARENB; // No chetnost
-        tty.c_cflag &= ~CSTOPB; // 1 stop bit
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8; // 8 bits per byte
-        tty.c_cflag |= (CREAD | CLOCAL); // Read and write with ognoring of a control line
-        tty.c_cflag &= ~CRTSCTS; // No flow control
+
+        // raw non canonical mode
+        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON | IXOFF | IXANY);
+        tty.c_cflag &= ~(PARENB | CSTOPB | CSIZE | CRTSCTS);
+        tty.c_cflag |= (CS8 | CREAD | CLOCAL); // Read and write with ognoring of a control line and 8 bits per byte
+        tty.c_lflag &= ~(ICANON | ECHO | ECHONL | ISIG | IEXTEN);
+        tty.c_oflag &= ~(OPOST | ONLCR); // prevent spesioan interruption for output bytes
+
+
+        // recv timeout
         tty.c_cc[VMIN] = 0;
         tty.c_cc[VTIME] = settings.recv_timeout_desisec; // 1 secod = 10
-
-        tty.c_lflag &= ~ICANON;
-        tty.c_lflag &= ~ECHO;
-        tty.c_lflag &= ~ECHOE;
-        tty.c_lflag &= ~ECHONL;
-        tty.c_lflag &= ~ISIG;
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY); // no xon/xoff
-
-        tty.c_oflag &= ~OPOST; // prevent spesioan interruption for output bytes
-        tty.c_oflag &= ~ONLCR; // Prevent convertion of newline ot carrige return
 
         tcsetattr(serial_port, TCSANOW, &tty);
         ctrl.setVaue(false);
@@ -237,11 +141,11 @@ public:
 
     bool whaitWrite()
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
         return true;
     }
 
-    bool writeData(const std::string& data)
+    bool writeData(const raw_data& data)
     {
         auto offset = 0;
         std::cout << "Sending " << data.size() << std::endl;
@@ -279,24 +183,27 @@ public:
             if(res < 0)
                 return false;
             offset += res;
+            std::cout << offset << ":" << data.size() << std::endl;
         }
         return tcdrain(serial_port) == 0;
     }
 
-    std::string readData()
+    raw_data readData()
     {
-        std::string out;
-        char buffer[1024*4];
+        raw_data out;
+        raw_data buffer(1024*9);
         int n{0};
         do
         {
-            n = read(serial_port, buffer, sizeof(buffer));
+            n = read(serial_port, buffer.data(), buffer.size());
             if(n > 0)
-                out.append(buffer, n);
+                for(int i=0; i<n; ++i)
+                    out.push_back(buffer[i]);
             else
                 throw uart_err("Failed to read from UART");
         }
-        while(buffer[n-1] != *reinterpret_cast<const char*>(&STOP_BYTE));
+        while(buffer[n-1] != STOP_BYTE);
+        std::cout << "Got " << out.size() << std::endl;
         return out;
     }
 };
@@ -324,59 +231,82 @@ class ProtocolPrivate
 public:
     std::queue<std::string> frames_queue;
     using msg_size_type = uint16_t;
-    using msg_num_type = uint16_t;
-    using checksumm_type = uint16_t;
+    using checksumm_type = uint32_t;
 
     std::unique_ptr<Serial> serial;
     SerialSettings ssettings;
 
-    msg_num_type msg_cout{0};
-    std::queue<std::string> cache;
+    std::queue<std::vector<raw_data>> cache;
     std::mutex mutex;
 
-    static checksumm_type checksumm(const std::string& data)
+    static uint32_t crc32(const std::vector<uint8_t>& data)
     {
-        checksumm_type crc = 0xffff;
-        for(auto byte: data)
-        {
-            crc ^= (uint8_t)byte << 8;
-            for(int i=0; i<8; ++i)
-                if(crc & 0x8000)
-                    crc = (crc << 1) ^ 0x1021;
+        uint32_t crc = 0xFFFFFFFF;
+        for (uint8_t byte : data) {
+            crc ^= byte;
+            for (int i = 0; i < 8; i++) {
+                if (crc & 1)
+                    crc = (crc >> 1) ^ 0xEDB88320;
                 else
-                    crc <<= 1;
+                    crc >>= 1;
+            }
         }
-        return crc;
+        return ~crc;
     }
 
-    std::string formMsg(const std::string& payload, msg_type_type type = MSG_DATA)
+    std::vector<raw_data> formMsg(msg_type_type type)
     {
-        std::string res;
-        res.resize(sizeof(msg_size_type) + sizeof(msg_cout) + sizeof(type) + payload.size());
-        size_t offset{0};
-
-        msg_size_type size = payload.size();
-        memcpy(res.data()+offset, &size, sizeof(size));
-        offset += sizeof(size);
-
-        memcpy(res.data()+offset, &msg_cout, sizeof(msg_cout));
-        offset += sizeof(msg_cout);
-        ++msg_cout;
-
-        memcpy(res.data()+offset, &type, sizeof(type));
-        offset += sizeof(type);
-
-        memcpy(res.data()+offset, payload.data(), payload.size());
-        offset += payload.size();
-
-        auto ch = checksumm(res);
-        res.insert(0, reinterpret_cast<const char*>(&START_BYTE), sizeof(START_BYTE));
-        res.append(reinterpret_cast<const char*>(&ch), sizeof(ch));
-        res.append(reinterpret_cast<const char*>(&STOP_BYTE), sizeof(STOP_BYTE));
-        return res;
+        return formMsg({""}, type);
     }
 
-    static std::string unwrapMsg(bool& ok, std::string& msg, msg_type_type& type, msg_num_type& seq)
+    std::vector<raw_data> formMsg(const std::vector<std::string>& payloads, msg_type_type type)
+    {
+        std::vector<raw_data> list;
+        msg_part_type of = payloads.size();
+        for(int i=0; i<payloads.size(); ++i)
+        {
+            raw_data payload(payloads[i].size());
+            memcpy(payload.data(), payloads[i].data(), payload.size());
+            raw_data res;
+            auto total = sizeof(msg_size_type)+ sizeof(type) + payload.size();
+            if(type == MSG_DATA)
+                total += sizeof(msg_part_type)*2;
+            res.resize(total);
+            size_t offset{0};
+
+            msg_size_type size = payload.size();
+            memcpy(res.data()+offset, &size, sizeof(size));
+            offset += sizeof(size);
+
+            memcpy(res.data()+offset, &type, sizeof(type));
+            offset += sizeof(type);
+
+            if(type == MSG_DATA)
+            {
+                msg_part_type part = i+1;
+                memcpy(res.data()+offset, &part, sizeof(part));
+                offset += sizeof(part);
+
+                memcpy(res.data()+offset, &of, sizeof(of));
+                offset += sizeof(of);
+            }
+
+            memcpy(res.data()+offset, payload.data(), payload.size());
+            offset += payload.size();
+
+            auto ch = crc32(res);
+            raw_data chv(sizeof(ch));
+            memcpy(chv.data(), &ch, sizeof(ch));
+            res.insert(res.begin(), START_BYTE);
+            for(auto v: chv)
+                res.push_back(v);
+            res.push_back(STOP_BYTE);
+            list.push_back(res);
+        }
+        return list;
+    }
+
+    static std::string unwrapMsg(bool& ok, raw_data& msg, msg_type_type& type, msg_part_type& part, msg_part_type& of)
     {
         ok = false;
         size_t offset{0};
@@ -390,28 +320,60 @@ public:
         memcpy(&len, msg.data()+offset, sizeof(len));
         offset += sizeof(len);
 
-        memcpy(&seq, msg.data()+offset, sizeof(seq));
-        offset += sizeof(seq);
-
         memcpy(&type, msg.data()+offset, sizeof(type));
 
         switch (type)
         {
-        case MSG_ACK:
         case MSG_DATA:
-        case MSG_DONE:
-        case MSG_ERROR:
+            std::cout << "data";
+            break;
+        case MSG_ACK:
+            std::cout << "act";
+            break;
         case MSG_NACK:
+            std::cout << "nack";
+            break;
+        case MSG_MNACK:
+            std::cout << "mnack";
+            break;
         case MSG_READY:
+            std::cout << "ready";
+            break;
+        case MSG_DONE:
+            std::cout << "done";
+            break;
+        case MSG_PING:
+            std::cout << "ping";
             break;
         default:
-            return "unknown messgae type";
+            return "unknown message";
         }
-
         offset += sizeof(type);
 
-        if(len+offset+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
-            return "bad length";
+
+        if(type == MSG_DATA)
+        {
+            if(len+offset+sizeof(msg_part_type)*2+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
+            {
+                std::cout << std::endl;
+                return "bad length";
+            }
+
+            memcpy(&part, msg.data()+offset, sizeof(part));
+            offset += sizeof(part);
+
+            memcpy(&of, msg.data()+offset, sizeof(of));
+            offset += sizeof(of);
+            std::cout << " " << part << " of " << of << std::endl;
+        }
+        else
+        {
+            if(len+offset+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
+                return "bad length";
+            part = 1;
+            of = 1;
+        }
+
 
         std::string payload;
         payload.resize(len);
@@ -420,12 +382,16 @@ public:
 
         checksumm_type ch;
         memcpy(&ch, msg.data()+offset, sizeof(ch));
-        std::string cspl;
-        cspl.resize(offset-sizeof(START_BYTE));
+        raw_data cspl(offset-sizeof(START_BYTE));
         memcpy(cspl.data(), msg.data()+sizeof(START_BYTE), offset-sizeof(START_BYTE));
 
-        if(ch != checksumm(cspl))
-            return "checksumm failed";
+        auto rchs = crc32(cspl);
+
+        if(ch != rchs)
+        {
+            std::cout << ch << " " << rchs << std::endl;
+            return "checksumm failed for " + payload+"|"+std::to_string(payload.size());
+        }
         offset += sizeof(ch);
 
         memcpy(&start_b, msg.data()+offset, sizeof(start_b));
@@ -434,14 +400,16 @@ public:
         offset += sizeof(start_b);
 
         ok = true;
-        if(offset == msg.size())
-            msg.clear();
-        else
-            msg.erase(0, offset);
+        msg.clear();
         return payload;
     }
 
-    void sendMessage(const std::string& payload, msg_type_type type = MSG_DATA)
+    void sendMessage(msg_type_type type)
+    {
+        sendMessage({""}, type);
+    }
+
+    void sendMessage(const std::vector<std::string>& payloads, msg_type_type type)
     {
         if(!running)
             return;
@@ -457,8 +425,8 @@ public:
         case MSG_NACK:
             std::cout << "nack";
             break;
-        case MSG_ERROR:
-            std::cout << "error";
+        case MSG_MNACK:
+            std::cout << "mnack";
             break;
         case MSG_READY:
             std::cout << "ready";
@@ -466,17 +434,43 @@ public:
         case MSG_DONE:
             std::cout << "done";
             break;
+        case MSG_PING:
+            std::cout << "ping";
+            break;
         default:
             std::cout << "unknown";
             break;
         }
         std::cout << std::endl;
+        std::vector<raw_data> mp_q;
+        for(const auto& msg: formMsg(payloads, type))
+            mp_q.push_back(msg);
         std::lock_guard<std::mutex> l(mutex);
-        cache.push(formMsg(payload, type));
+        cache.push(mp_q);
     }
 
-    bool fullSend(const std::string& message)
+    bool fullSend(const std::vector<raw_data>& mp_q)
     {
+        int bad_count{0};
+        bool mp_failed;
+        while(bad_count < retry_cout)
+        {
+            for(const auto& msg: mp_q)
+                if(!fullSend(msg, mp_failed))
+                {
+                    if(!mp_failed)
+                        return false;
+                    break;
+                }
+            if(!mp_failed)
+                return true;
+        }
+        return false;
+    }
+
+    bool fullSend(const raw_data& message, bool& mpart_failed)
+    {
+        mpart_failed = false;
         assert(serial);
         int bad_count{0}, nack_count{0};
         serial.reset(nullptr);
@@ -484,6 +478,8 @@ public:
         serial.reset(new Serial(ssettings));
         while(bad_count < retry_cout)
         {
+            if(!serial->whaitWrite())
+                return false;
             {
                 SerialLock l(serial.get());
                 if(!serial->writeData(message))
@@ -492,7 +488,7 @@ public:
             if(!serial->whaitRead())
                 return false;
             int i{0};
-            std::string reply;
+            raw_data reply;
             for(; i<retry_cout; ++i)
                 try
                 {
@@ -514,21 +510,34 @@ public:
             }
             bool ok;
             msg_type_type rep_type;
-            msg_num_type num;
-            unwrapMsg(ok, reply, rep_type, num);
-            if(ok && rep_type == MSG_ACK)
-                return true;
-            if(ok)
+            msg_part_type part, of;
+            unwrapMsg(ok, reply, rep_type, part, of);
+            if(part != of && part != 1)
             {
-                if(rep_type != MSG_NACK)
-                {
-                    ++bad_count;
-                    std::cerr << "Got unexpected messgae type, countinuing to resend anyway" << std::endl;
-                }
-                ++nack_count;
+                std::cerr << "bad parts" << std::endl;
+                ++bad_count;
             }
             else
-                ++bad_count;
+            {
+                if(ok && rep_type == MSG_ACK)
+                    return true;
+                if(ok)
+                {
+                    if(rep_type != MSG_NACK && rep_type != MSG_MNACK)
+                    {
+                        ++bad_count;
+                        std::cerr << "Got unexpected messgae type, countinuing to resend anyway" << std::endl;
+                    }
+                    if(rep_type == MSG_MNACK)
+                    {
+                        mpart_failed = true;
+                        return false;
+                    }
+                    ++nack_count;
+                }
+                else
+                    ++bad_count;
+            }
 
             if(nack_count >= retry_cout)
             {
@@ -541,52 +550,99 @@ public:
         return false;
     }
 
-    bool fullRecv(std::string& message, msg_type_type& type, msg_num_type& seq)
+    bool fullRecv(std::string& message, msg_type_type& type, Protocol::ClientErrorCallback error_callback, bool& aborted)
     {
-        bool ok{false};
-        while(!ok)
+        message.clear();
+        msg_part_type part{0}, last_part{0}, of{1};
+        msg_type_type last_type;
+        while(part < of)
         {
-            if(!serial->whaitRead())
-                return false;
-            int i{0};
-            for(;i < retry_cout; ++i)
-                try
+            std::string section;
+            bool ok{false};
+            while(!ok)
+            {
+                if(!serial->whaitRead())
                 {
-                    message = serial->readData();
-                    break;
+                    aborted = error_callback(Protocol::EmptyError, "no data");
+                    return false;
                 }
-                catch(const std::exception& e)
+                int i{0};
+                raw_data recv;
+                for(;i < retry_cout; ++i)
+                    try
+                    {
+                        recv = serial->readData();
+                        break;
+                    }
+                    catch(const std::exception& e)
+                    {
+                        aborted = !error_callback(Protocol::ReadError, e.what());
+                        if(aborted)
+                            return false;
+                    }
+                    catch(...)
+                    {
+                        aborted = !error_callback(Protocol::ReadError, "unknown error");
+                        return false;
+                    }
+
+                if(i >= retry_cout)
                 {
-                    //std::cerr << e.what() << std::endl;
-                }
-                catch(...)
-                {
+                    aborted = !error_callback(Protocol::RetryError, "Failed to read from UART");
                     return false;
                 }
 
-            if(i >= retry_cout)
-                return false;
-
-            message = unwrapMsg(ok, message, type, seq);
-            if(!serial->whaitWrite())
-                return false;
-            SerialLock l(serial.get());
-            if(!ok)
-            {
-                std::cerr << message << std::endl;
-                std::cerr << "Sending NACK: " << serial->writeData(formMsg("", MSG_NACK)) << std::endl;
-            }
-            else
-            {
-                int i{0};
-                for(;i<retry_cout*10; ++i)
-                    if(serial->writeData(formMsg("", MSG_ACK)))
-                        break;
-                if(i >= retry_cout*10)
+                section = unwrapMsg(ok, recv, type, part, of);
+                if(!serial->whaitWrite())
                 {
-                    std::cout << "Failed to reply" << std::endl;
+                    aborted = !error_callback(Protocol::WriteError, "failed to initialise reply");
+                    return false;
+                }
+                SerialLock l(serial.get());
+                if(!ok)
+                {
+                    aborted = !error_callback(Protocol::MsgError, section);
+                    if(aborted)
+                        return false;
+                    std::cerr << "Sending NACK: " << serial->writeData(formMsg(MSG_NACK).front()) << std::endl;
+                }
+                else
+                {
+                    bool mp_failed{false};
+                    if(last_part+1 != part)
+                    {
+                        aborted = !error_callback(Protocol::MutipartError, "part of multipart message is missing");
+                        if(aborted)
+                            return false;
+                        mp_failed = true;
+                    }
+                    if((last_part > 0 && last_type != type) || part > of)
+                    {
+                        aborted = !error_callback(Protocol::MutipartError, "part types missmacth or last parts are missing");
+                        if(aborted)
+                            return false;
+                        mp_failed = true;
+                    }
+                    int i{0};
+                    for(;i<retry_cout*10; ++i)
+                        if(serial->writeData(formMsg(mp_failed ? MSG_MNACK : MSG_ACK).front()))
+                            break;
+                    if(i >= retry_cout*10)
+                    {
+                        aborted = !error_callback(Protocol::RetryError, "failed to reply");
+                        if(!aborted)
+                            return false;
+                        std::cout << "Failed to reply" << std::endl;
+                    }
+                    if(mp_failed)
+                        return false;
                 }
             }
+
+            last_type = type;
+            last_part = part;
+            message.append(section);
+            std::cout << "part recv end" << std::endl;
         }
         return true;
     }
@@ -594,9 +650,9 @@ public:
     std::future<void> worker;
     std::atomic_bool running{true};
     const int retry_cout;
-    std::string last_error;
     bool started{false};
     Protocol::ClientPollAction on_recv_actor;
+    Protocol::ClientErrorCallback on_error_act;
 
     class ProtocolError: public std::runtime_error
     {
@@ -620,30 +676,41 @@ Protocol::Protocol(const SerialSettings& settings, int retry_count, bool server)
     {
         p->worker = std::async(std::launch::async, [this]()
         {
-            bool queue_empty{true};
-            while(p->running || !queue_empty)
+            size_t queue_size{1};
+            while(p->running || queue_size > 0)
             {
+                std::vector<raw_data> mp_q;
                 {
                     std::lock_guard<std::mutex> l(p->mutex);
                     if(!p->cache.empty())
                     {
                         if(p->cache.front().empty())
                         {
+                            std::cout << "protocol queue: done" << std::endl;
                             p->running = false;
                             return;
                         }
-                        if(!p->fullSend(p->cache.front()))
-                        {
-                            p->last_error = "Protocol failed";
-                            p->running = false;
-                            return;
-                        }
+                        mp_q = p->cache.front();
                         p->cache.pop();
                     }
-                    queue_empty = p->cache.empty();
+                    else
+                        mp_q = p->formMsg(MSG_PING);
+                    queue_size = p->cache.size();
                 }
-                if(p->running && queue_empty)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                auto start = std::chrono::high_resolution_clock::now();
+                if(!p->fullSend(mp_q))
+                {
+                    p->running = false;
+                    std::cerr << "Protocol failed" << std::endl;
+                    return;
+                }
+                else if(queue_size > 0)
+                    std::cout << "protocol queue: " << queue_size << std::endl;
+
+                int t_offset = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count();
+                static const constexpr int sleep_time = 200;
+                if(p->running && queue_size <= 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(std::max(sleep_time - t_offset, 100)));
             }
         });
     }
@@ -657,47 +724,61 @@ Protocol::~Protocol() noexcept(false)
         usleep(10000);
     }
     p->worker.wait();
-    if(!p->last_error.empty())
-        std::cerr << p->last_error << std::endl;
     delete p;
 }
 
-void Protocol::poll(ClientPollAction action)
+void Protocol::poll(ClientPollAction action, ClientErrorCallback error_cb)
 {
     p->on_recv_actor = action;
+    p->on_error_act = error_cb;
     p->worker = std::async(std::launch::async, [this]()
     {
         std::string msg;
         msg_type_type type;
-        ProtocolPrivate::msg_num_type num;
         while(p->running)
         {
-            auto last = num;
-            if(!p->fullRecv(msg, type, num))
+            bool aborted;
+            if(!p->fullRecv(msg, type, p->on_error_act, aborted))
             {
+                if(aborted)
+                {
+                    p->running = false;
+                    return;
+                }
                 p->serial.reset(nullptr);
                 p->serial.reset(new Serial(p->ssettings));
                 continue;
             }
-            if(last != num)
-                p->on_recv_actor(msg, type);
+            if(!p->on_recv_actor(msg, type))
+            {
+                p->running = false;
+                return;
+            }
         }
     });
+}
+
+bool Protocol::polling()
+{
+    return p->running;
 }
 
 void Protocol::start()
 {
     if(p->started)
         throw ProtocolPrivate::ProtocolError("attempt to ready multiple times");
-    p->sendMessage("", MSG_READY);
+    p->sendMessage(MSG_READY);
     p->started = true;
 }
 
-void Protocol::sendPayload(const std::string& message, bool is_error)
+void Protocol::sendPayload(const std::string& message)
 {
     if(!p->started)
         throw ProtocolPrivate::ProtocolError("attempt to send messgae before ready");
-    p->sendMessage(message, is_error ? MSG_ERROR : MSG_DATA);
+    std::vector<std::string> msgs;
+    for(size_t i=0; i<message.size(); i+=p->ssettings.msg_part_max_size)
+        msgs.push_back(message.substr(i, p->ssettings.msg_part_max_size));
+    p->sendMessage(msgs, MSG_DATA);
 }
 
 void Protocol::stop()
@@ -707,21 +788,29 @@ void Protocol::stop()
         p->running = false;
         return;
     }
-    p->sendMessage("", MSG_DONE);
+    p->sendMessage(MSG_DONE);
     std::lock_guard<std::mutex> l(p->mutex);
-    p->cache.push("");
+    p->cache.push({});
     p->started = false;
+}
+
+void Protocol::whaitAllSend()
+{
+    bool queue_empty{false};
+    while(p->running && !queue_empty)
+    {
+        {
+            std::lock_guard<std::mutex> l(p->mutex);
+            queue_empty = p->cache.empty();
+        }
+        if(!queue_empty)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 }
 
 bool Protocol::status()
 {
     return p->running;
-}
-
-std::string Protocol::lastError()
-{
-    std::lock_guard<std::mutex> l(p->mutex);
-    return p->last_error;
 }
 
 }

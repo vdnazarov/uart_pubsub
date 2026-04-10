@@ -11,7 +11,7 @@ option(UPS_TEST "Build test app" ON)
 set(PLIB_SRC protocol.cpp)
 set(PLIB_H protocol.h)
 add_library(ulprotocol SHARED ${PLIB_SRC} ${PLIB_H})
-target_link_libraries(ulprotocol PUBLIC Threads::Threads)
+target_link_libraries(ulprotocol PUBLIC Threads::Threads wiringPi wiringPiDev)
 set_target_properties(ulprotocol PROPERTIES PUBLIC_HEADER ${PLIB_H})
 target_compile_options(ulprotocol PUBLIC -fPIC -g -Wall -Wno-unknown-pragmas)
 

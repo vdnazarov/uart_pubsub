@@ -7,6 +7,7 @@
 
 #include <signal.h>
 #include <iostream>
+#include <thread>
 
 bool running{true};
 
@@ -39,17 +40,42 @@ int main(int argc, char* argv[])
         case protocol::MSG_DONE:
             std::cout << "Server done" << std::endl;
             break;
-        case protocol::MSG_ERROR:
-            std::cerr << "Got error: " << msg << std::endl;
+        case protocol::MSG_PING:
+            std::cout << "Got ping" << std::endl;
             break;
         default:
             std::cerr << "Got unexpected message type " << type << std::endl;
             return false;
         }
-        return true;
+        return running;
+    },[](protocol::Protocol::PollError et, const std::string& err) -> bool
+    {
+        switch(et)
+        {
+        case protocol::Protocol::PollError::EmptyError:
+            std::cerr << "empty error: ";
+            break;
+        case protocol::Protocol::PollError::MsgError:
+            std::cerr << "message error: ";
+            break;
+        case protocol::Protocol::PollError::MutipartError:
+            std::cerr << "multipart error: ";
+            break;
+        case protocol::Protocol::PollError::ReadError:
+            std::cerr << "read error: ";
+            break;
+        case protocol::Protocol::PollError::RetryError:
+            std::cerr << "retry error: ";
+            break;
+        case protocol::Protocol::PollError::WriteError:
+            std::cerr << "write error: ";
+            break;
+        }
+        std::cerr << err << std::endl;
+        return running;
     });
     while(running)
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     p.stop();
     return 0;
 }
