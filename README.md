@@ -9,6 +9,7 @@ Library should work under any Linux based system. It tested with
 # Requirements
  - `CMake` 3.5 or later
  - build-essentials (`gcc`, `make`, cmake compatable threading library, such as `pthread`)
+ - WiringPi for GPIO control
 
 # Standalone build
 ```bash
