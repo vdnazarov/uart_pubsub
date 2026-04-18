@@ -268,31 +268,31 @@ public:
             raw_data payload(payloads[i].size());
             memcpy(payload.data(), payloads[i].data(), payload.size());
             raw_data res;
-            auto total = sizeof(msg_size_type)+ sizeof(type) + payload.size();
+            auto total = sizeof(type);
             if(type == MSG_DATA)
-                total += sizeof(msg_part_type)*2;
+                total += sizeof(msg_size_type) + sizeof(msg_part_type)*2 + payload.size();
             res.resize(total);
             size_t offset{0};
-
-            msg_size_type size = payload.size();
-            memcpy(res.data()+offset, &size, sizeof(size));
-            offset += sizeof(size);
 
             memcpy(res.data()+offset, &type, sizeof(type));
             offset += sizeof(type);
 
             if(type == MSG_DATA)
             {
+                msg_size_type size = payload.size();
+                memcpy(res.data()+offset, &size, sizeof(size));
+                offset += sizeof(size);
+
                 msg_part_type part = i+1;
                 memcpy(res.data()+offset, &part, sizeof(part));
                 offset += sizeof(part);
 
                 memcpy(res.data()+offset, &of, sizeof(of));
                 offset += sizeof(of);
-            }
 
-            memcpy(res.data()+offset, payload.data(), payload.size());
-            offset += payload.size();
+                memcpy(res.data()+offset, payload.data(), payload.size());
+                offset += payload.size();
+            }
 
             auto ch = crc32(res);
             raw_data chv(sizeof(ch));
@@ -315,10 +315,6 @@ public:
         if(start_b != START_BYTE)
             return "Bad start byte";
         offset += sizeof(start_b);
-
-        msg_size_type len;
-        memcpy(&len, msg.data()+offset, sizeof(len));
-        offset += sizeof(len);
 
         memcpy(&type, msg.data()+offset, sizeof(type));
 
@@ -351,8 +347,19 @@ public:
         offset += sizeof(type);
 
 
+        std::string payload;
         if(type == MSG_DATA)
         {
+            if(offset+sizeof(msg_part_type)*2+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
+            {
+                std::cout << std::endl;
+                return "bad length";
+            }
+
+            msg_size_type len;
+            memcpy(&len, msg.data()+offset, sizeof(len));
+            offset += sizeof(len);
+
             if(len+offset+sizeof(msg_part_type)*2+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
             {
                 std::cout << std::endl;
@@ -365,20 +372,18 @@ public:
             memcpy(&of, msg.data()+offset, sizeof(of));
             offset += sizeof(of);
             std::cout << " " << part << " of " << of << std::endl;
+
+            payload.resize(len);
+            memcpy(payload.data(), msg.data()+offset, len);
+            offset += len;
         }
         else
         {
-            if(len+offset+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
+            if(offset+sizeof(checksumm_type)+sizeof(STOP_BYTE) > msg.size())
                 return "bad length";
             part = 1;
             of = 1;
         }
-
-
-        std::string payload;
-        payload.resize(len);
-        memcpy(payload.data(), msg.data()+offset, len);
-        offset += len;
 
         checksumm_type ch;
         memcpy(&ch, msg.data()+offset, sizeof(ch));
@@ -403,6 +408,7 @@ public:
         msg.clear();
         return payload;
     }
+
 
     void sendMessage(msg_type_type type)
     {
